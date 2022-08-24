@@ -12,6 +12,8 @@ pub use slog_scope::{
 };
 
 pub mod logger;
+pub mod shell;
+pub mod udevs;
 
 #[macro_export]
 macro_rules! wait {

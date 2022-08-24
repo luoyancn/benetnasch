@@ -12,3 +12,7 @@ slog = {version = "2.7.0", features = ["max_level_trace", "release_max_level_tra
 slog-scope = "4.4.0"
 slog-term = "2.9.0"
 slog-stdlog = "4.1.0"
+tokio-udev = "0.8.0"
+futures-util = "0.3.23"
+futures = "0.3.23"
+tokio = {version="1.20.1",features = ["full"]}
