@@ -1,7 +1,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{mpsc, Mutex};
+use std::sync::{mpsc, Mutex, Once};
 use std::thread;
 use std::time::{Duration, Instant};
 use std::u64;
@@ -11,6 +11,8 @@ use slog::{Drain, Record};
 use slog_term::{CountingWriter, RecordDecorator, ThreadSafeTimestampFn};
 
 pub use slog::Level;
+
+use crate::config;
 
 const TIMESTAMP_FORMAT: &str = "%Y-%m-%d %H:%M:%S%.9f";
 
@@ -258,7 +260,7 @@ fn custom_print_msg_header(
     write!(rd, " ")?;
 
     rd.start_level()?;
-    write!(rd, "[{:<8}]", record.level().as_str())?;
+    write!(rd, "[{:^8}]", record.level().as_str())?;
     if use_file_location {
         rd.start_whitespace()?;
         write!(rd, " ")?;
@@ -381,4 +383,72 @@ pub fn setup_logger(
     let guard = slog_scope::set_global_logger(logger);
     slog_stdlog::init().unwrap();
     guard.cancel_reset();
+}
+
+static INIT: Once = Once::new();
+
+lazy_static! {
+    pub static ref LOG_PATH: Mutex<String> = Mutex::new(String::from("/var/log/logs"));
+    pub static ref LOG_KEEP: Mutex<i32> = Mutex::new(0);
+    pub static ref LOG_MAX_SIZE_MB: Mutex<i32> = Mutex::new(100);
+    pub static ref LOG_LEVEL: Mutex<Level> = Mutex::new(Level::Debug);
+    pub static ref LOG_VERBOSE: Mutex<bool> = Mutex::new(false);
+    pub static ref LOG_FILE_ENABLE: Mutex<bool> = Mutex::new(false);
+    pub static ref LOG_STD_ENABLE: Mutex<bool> = Mutex::new(true);
+}
+
+pub struct DefaultLogConfig();
+
+impl config::ConfigTrait for DefaultLogConfig {
+    fn set_default(&self) {
+        INIT.call_once(|| {
+            viperus::add_default("default.log_path", "/var/log/logs".to_owned());
+            viperus::add_default("default.log_keep", 7);
+            viperus::add_default("default.log_max_size_mb", 100);
+            viperus::add_default("default.log_level", 100);
+            viperus::add_default("default.log_verbose", false);
+            viperus::add_default("default.log_file_enable", false);
+            viperus::add_default("default.log_std_enable", true);
+        });
+    }
+
+    fn overwrite(&self) {
+        if let Some(overwrited) = viperus::get::<String>("default.log_path") {
+            if let Ok(mut log_path) = LOG_PATH.lock() {
+                *log_path = overwrited;
+            }
+        }
+        if let Some(overwrited) = viperus::get::<i32>("default.log_keep") {
+            if let Ok(mut log_keep) = LOG_KEEP.lock() {
+                *log_keep = overwrited;
+            }
+        }
+        if let Some(overwrited) = viperus::get::<i32>("default.log_max_size_mb") {
+            if let Ok(mut log_max_size_mb) = LOG_MAX_SIZE_MB.lock() {
+                *log_max_size_mb = overwrited;
+            }
+        }
+        if let Some(overwrited) = viperus::get::<i32>("default.log_level") {
+            if let Ok(mut log_level) = LOG_LEVEL.lock() {
+                if overwrited <= 6 && overwrited > 0 {
+                    *log_level = Level::from_usize(overwrited as usize).unwrap();
+                }
+            }
+        }
+        if let Some(overwrited) = viperus::get::<bool>("default.log_verbose") {
+            if let Ok(mut log_verbose) = LOG_VERBOSE.lock() {
+                *log_verbose = overwrited;
+            }
+        }
+        if let Some(overwrited) = viperus::get::<bool>("default.log_file_enable") {
+            if let Ok(mut log_file_enable) = LOG_FILE_ENABLE.lock() {
+                *log_file_enable = overwrited;
+            }
+        }
+        if let Some(overwrited) = viperus::get::<bool>("default.log_std_enable") {
+            if let Ok(mut log_std_enable) = LOG_STD_ENABLE.lock() {
+                *log_std_enable = overwrited;
+            }
+        }
+    }
 }
