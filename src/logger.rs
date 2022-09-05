@@ -385,10 +385,23 @@ pub fn setup_logger(
     guard.cancel_reset();
 }
 
+pub fn setup_logger_with_cfg() {
+    setup_logger(
+        LOG_STD_ENABLE.lock().unwrap().to_owned(),
+        LOG_FILE_ENABLE.lock().unwrap().to_owned(),
+        LOG_PATH.lock().unwrap().as_str(),
+        LOG_MAX_SIZE_MB.lock().unwrap().to_owned() as u64 * MB,
+        LOG_LEVEL.lock().unwrap().to_owned(),
+        LOG_VERBOSE.lock().unwrap().to_owned(),
+        LOG_KEEP.lock().unwrap().to_owned() as usize,
+        false,
+    );
+}
+
 static INIT: Once = Once::new();
 
 lazy_static! {
-    pub static ref LOG_PATH: Mutex<String> = Mutex::new(String::from("/var/log/logs"));
+    pub static ref LOG_PATH: Mutex<String> = Mutex::new(String::from("logs"));
     pub static ref LOG_KEEP: Mutex<i32> = Mutex::new(0);
     pub static ref LOG_MAX_SIZE_MB: Mutex<i32> = Mutex::new(100);
     pub static ref LOG_LEVEL: Mutex<Level> = Mutex::new(Level::Debug);
@@ -402,10 +415,10 @@ pub struct DefaultLogConfig();
 impl config::ConfigTrait for DefaultLogConfig {
     fn set_default(&self) {
         INIT.call_once(|| {
-            viperus::add_default("default.log_path", "/var/log/logs".to_owned());
+            viperus::add_default("default.log_path", "logs".to_owned());
             viperus::add_default("default.log_keep", 7);
             viperus::add_default("default.log_max_size_mb", 100);
-            viperus::add_default("default.log_level", 100);
+            viperus::add_default("default.log_level", 5);
             viperus::add_default("default.log_verbose", false);
             viperus::add_default("default.log_file_enable", false);
             viperus::add_default("default.log_std_enable", true);

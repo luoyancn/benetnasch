@@ -12,9 +12,15 @@ slog = {version = "2.7.0", features = ["max_level_trace", "release_max_level_tra
 slog-scope = "4.4.0"
 slog-term = "2.9.0"
 slog-stdlog = "4.1.0"
-tokio-udev = "0.8.0"
 futures-util = "0.3.23"
 futures = "0.3.23"
 tokio = {version="1.20.1",features = ["full"]}
 lazy_static = "1.4.0"
 viperus = "0.1.10"
+
+[target.'cfg(all(target_family = "unix", not(target_os = "windows")))'.dependencies]
+tokio-udev = "0.8.0"
+
+[profile.release]
+lto = true
+strip = true

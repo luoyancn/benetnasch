@@ -5,6 +5,7 @@ extern crate libflate;
 extern crate slog_scope;
 extern crate slog_stdlog;
 extern crate slog_term;
+extern crate viperus;
 
 #[macro_use]
 extern crate lazy_static;
@@ -16,7 +17,13 @@ pub use slog_scope::{
 
 pub mod config;
 pub mod logger;
+
+#[cfg(all(target_family = "unix", not(target_os = "windows")))]
+#[allow(unused)]
 pub mod shell;
+
+#[cfg(all(target_family = "unix", not(target_os = "windows")))]
+#[allow(unused)]
 pub mod udevs;
 
 #[macro_export]

@@ -1,5 +1,4 @@
-extern crate viperus;
-
+use std::path::PathBuf;
 pub enum ValidValue<'a> {
     Str(&'a str),
     Int(i32),
@@ -11,7 +10,7 @@ pub type ConfigMap<'a> = std::collections::HashMap<&'a str, ValidValue<'a>>;
 /// Trait of set the (default or overwrite) global configurations from toml file
 ///
 /// The implements must be include the set_default and overwrite method
-/// Notice: This Trait is recommand to use with the crate named viperus
+/// Notice: This Trait is recommend to use with the crate named viperus
 /// (https://crates.io/crates/viperus)
 ///
 /// An valid implement of this Trait maybe like follows:
@@ -58,17 +57,32 @@ pub trait ConfigTrait {
 /// ```
 /// let def_log_conf = DefaultLogConfig {};
 /// def_log_conf.set_default();
-/// read_config("/tmp/example.toml", vec![def_log_conf]);
+/// read_config("/tmp/example.toml", vec![Box::new(def_log_conf)]);
 /// setup_logger(LOG_STD_ENABLE.lock().unwrap().to_owned())
 /// ```
 ///
-pub fn read_config(config_file: &str, configs: Vec<impl ConfigTrait>) {
-    if viperus::load_file(config_file, viperus::Format::TOML).is_err() {
-        println!(
-            "Cannot read the config file {}, Use default config values instead",
-            config_file
-        );
-        return;
+pub fn read_config(config_file: &str, configs: Vec<Box<dyn ConfigTrait>>) {
+    match PathBuf::from(config_file).canonicalize() {
+        Err(err) => {
+            println!(
+                "Cannot read the config file {}:{:?}, Use default config values instead",
+                config_file, err
+            );
+            return;
+        }
+
+        Ok(config_file_buf) => {
+            if let Err(err) = viperus::load_file(
+                config_file_buf.as_os_str().to_str().unwrap(),
+                viperus::Format::TOML,
+            ) {
+                println!(
+                    "Cannot read the config file {}:{:?}, Use default config values instead",
+                    config_file, err
+                );
+                return;
+            }
+        }
     }
 
     for config in configs {
