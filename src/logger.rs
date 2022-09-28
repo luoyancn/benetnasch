@@ -105,9 +105,9 @@ impl ColoredTermDecorator {
             Level::Critical => 129,
             Level::Error => 196,
             Level::Warning => 214,
-            Level::Info => 35,
+            Level::Info => 250,
             Level::Debug => 39,
-            Level::Trace => 24,
+            Level::Trace => 51,
         }
     }
 }
