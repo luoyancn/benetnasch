@@ -102,12 +102,12 @@ impl ColoredTermDecorator {
     /// Standard level to Unix color conversion used by `TermDecorator`
     pub fn level_to_color(level: slog::Level) -> u16 {
         match level {
-            Level::Critical => 5,
-            Level::Error => 1,
-            Level::Warning => 3,
-            Level::Info => 2,
+            Level::Critical => 129,
+            Level::Error => 196,
+            Level::Warning => 214,
+            Level::Info => 35,
             Level::Debug => 6,
-            Level::Trace => 4,
+            Level::Trace => 39,
         }
     }
 }
@@ -208,7 +208,7 @@ impl<'a> RecordDecorator for ColoredTermRecordDecorator<'a> {
         if !self.use_color {
             return Ok(());
         }
-        let color = ColoredTermDecorator::level_to_color(self.level) + 8;
+        let color = ColoredTermDecorator::level_to_color(self.level);
         match self.term {
             &mut AnyTerminal::Stdout {
                 ref mut term,
