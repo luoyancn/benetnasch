@@ -1,10 +1,12 @@
 #[macro_use]
 extern crate slog;
+extern crate atty;
 extern crate chrono;
 extern crate libflate;
 extern crate slog_scope;
 extern crate slog_stdlog;
 extern crate slog_term;
+extern crate term;
 extern crate viperus;
 
 #[macro_use]

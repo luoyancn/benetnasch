@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -6,9 +7,11 @@ use std::thread;
 use std::time::{Duration, Instant};
 use std::u64;
 
+use atty;
 use libflate::gzip::Encoder as GzipEncoder;
-use slog::{Drain, Record};
+use slog::{Drain, OwnedKVList, Record};
 use slog_term::{CountingWriter, RecordDecorator, ThreadSafeTimestampFn};
+use term;
 
 pub use slog::Level;
 
@@ -51,6 +54,283 @@ macro_rules! debug( ($($args:tt)+) => {
 macro_rules! trace( ($($args:tt)+) => {
     $crate::slog_scope_trace![$($args)+]
 };);
+
+enum AnyTerminal {
+    /// Stdout terminal
+    Stdout {
+        term: Box<term::StdoutTerminal>,
+        supports_reset: bool,
+        supports_color: bool,
+        supports_bold: bool,
+    },
+    /// Stderr terminal
+    Stderr {
+        term: Box<term::StderrTerminal>,
+        supports_reset: bool,
+        supports_color: bool,
+        supports_bold: bool,
+    },
+    FallbackStdout,
+    FallbackStderr,
+}
+
+impl AnyTerminal {
+    fn should_use_color(&self) -> bool {
+        match *self {
+            AnyTerminal::Stdout { .. } => atty::is(atty::Stream::Stdout),
+            AnyTerminal::Stderr { .. } => atty::is(atty::Stream::Stderr),
+            AnyTerminal::FallbackStdout => false,
+            AnyTerminal::FallbackStderr => false,
+        }
+    }
+}
+
+struct ColoredTermDecorator {
+    term: RefCell<AnyTerminal>,
+    use_color: bool,
+}
+
+impl ColoredTermDecorator {
+    /// Start building `TermDecorator`
+    #[allow(clippy::new_ret_no_self)]
+    pub fn new() -> ColoredTermDecoratorBuilder {
+        ColoredTermDecoratorBuilder::new()
+    }
+
+    /// `Level` color
+    ///
+    /// Standard level to Unix color conversion used by `TermDecorator`
+    pub fn level_to_color(level: slog::Level) -> u16 {
+        match level {
+            Level::Critical => 5,
+            Level::Error => 1,
+            Level::Warning => 3,
+            Level::Info => 2,
+            Level::Debug => 6,
+            Level::Trace => 4,
+        }
+    }
+}
+
+impl slog_term::Decorator for ColoredTermDecorator {
+    fn with_record<F>(&self, record: &Record, _logger_values: &OwnedKVList, f: F) -> io::Result<()>
+    where
+        F: FnOnce(&mut dyn RecordDecorator) -> io::Result<()>,
+    {
+        let mut term = self.term.borrow_mut();
+        let mut deco = ColoredTermRecordDecorator {
+            term: &mut *term,
+            level: record.level(),
+            use_color: self.use_color,
+        };
+        {
+            f(&mut deco)
+        }
+    }
+}
+
+/// Record decorator used by `TermDecorator`
+struct ColoredTermRecordDecorator<'a> {
+    term: &'a mut AnyTerminal,
+    level: slog::Level,
+    use_color: bool,
+}
+
+impl<'a> io::Write for ColoredTermRecordDecorator<'a> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match *self.term {
+            AnyTerminal::Stdout { ref mut term, .. } => term.write(buf),
+            AnyTerminal::Stderr { ref mut term, .. } => term.write(buf),
+            AnyTerminal::FallbackStdout => std::io::stdout().write(buf),
+            AnyTerminal::FallbackStderr => std::io::stderr().write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match *self.term {
+            AnyTerminal::Stdout { ref mut term, .. } => term.flush(),
+            AnyTerminal::Stderr { ref mut term, .. } => term.flush(),
+            AnyTerminal::FallbackStdout => std::io::stdout().flush(),
+            AnyTerminal::FallbackStderr => std::io::stderr().flush(),
+        }
+    }
+}
+
+impl<'a> Drop for ColoredTermRecordDecorator<'a> {
+    fn drop(&mut self) {
+        let _ = self.flush();
+    }
+}
+
+impl<'a> RecordDecorator for ColoredTermRecordDecorator<'a> {
+    fn reset(&mut self) -> io::Result<()> {
+        if !self.use_color {
+            return Ok(());
+        }
+        match *self.term {
+            AnyTerminal::Stdout {
+                ref mut term,
+                supports_reset,
+                ..
+            } if supports_reset => term.reset(),
+            AnyTerminal::Stderr {
+                ref mut term,
+                supports_reset,
+                ..
+            } if supports_reset => term.reset(),
+            _ => Ok(()),
+        }
+        .map_err(term_error_to_io_error)
+    }
+
+    fn start_level(&mut self) -> io::Result<()> {
+        if !self.use_color {
+            return Ok(());
+        }
+        let color = ColoredTermDecorator::level_to_color(self.level);
+        match *self.term {
+            AnyTerminal::Stdout {
+                ref mut term,
+                supports_color,
+                ..
+            } if supports_color => term.fg(color as term::color::Color),
+            AnyTerminal::Stderr {
+                ref mut term,
+                supports_color,
+                ..
+            } if supports_color => term.fg(color as term::color::Color),
+            _ => Ok(()),
+        }
+        .map_err(term_error_to_io_error)
+    }
+
+    fn start_key(&mut self) -> io::Result<()> {
+        if !self.use_color {
+            return Ok(());
+        }
+        let color = ColoredTermDecorator::level_to_color(self.level) + 8;
+        match self.term {
+            &mut AnyTerminal::Stdout {
+                ref mut term,
+                supports_color,
+                supports_bold,
+                ..
+            } => {
+                if supports_bold {
+                    term.attr(term::Attr::Bold)?;
+                }
+                if supports_color {
+                    term.fg(color as term::color::Color)?;
+                }
+                Ok(())
+            }
+            &mut AnyTerminal::Stderr {
+                ref mut term,
+                supports_color,
+                supports_bold,
+                ..
+            } => {
+                if supports_bold {
+                    term.attr(term::Attr::Bold)?;
+                }
+                if supports_color {
+                    term.fg(color as term::color::Color)?;
+                }
+                Ok(())
+            }
+            &mut AnyTerminal::FallbackStdout | &mut AnyTerminal::FallbackStderr => Ok(()),
+        }
+        .map_err(term_error_to_io_error)
+    }
+
+    fn start_timestamp(&mut self) -> io::Result<()> {
+        self.start_level()
+    }
+
+    fn start_location(&mut self) -> io::Result<()> {
+        self.start_level()
+    }
+
+    fn start_msg(&mut self) -> io::Result<()> {
+        // msg is just like key
+        self.start_key()
+    }
+}
+
+fn term_error_to_io_error(e: term::Error) -> io::Error {
+    match e {
+        term::Error::Io(e) => e,
+        e => io::Error::new(io::ErrorKind::Other, format!("term error: {}", e)),
+    }
+}
+
+struct ColoredTermDecoratorBuilder {
+    use_stderr: bool,
+    color: Option<bool>,
+}
+
+impl ColoredTermDecoratorBuilder {
+    fn new() -> Self {
+        ColoredTermDecoratorBuilder {
+            use_stderr: true,
+            color: None,
+        }
+    }
+
+    /// Force colored output
+    fn force_color(mut self) -> Self {
+        self.color = Some(true);
+        self
+    }
+
+    /// Force plain output
+    fn force_plain(mut self) -> Self {
+        self.color = Some(false);
+        self
+    }
+
+    /// Build `TermDecorator`
+    ///
+    /// Unlike `try_build` this it will fall-back to using plain `stdout`/`stderr`
+    /// if it wasn't able to use terminal directly.
+    fn build(self) -> ColoredTermDecorator {
+        let io = if self.use_stderr {
+            term::stderr()
+                .map(|t| {
+                    let supports_reset = t.supports_reset();
+                    let supports_color = t.supports_color();
+                    let supports_bold = t.supports_attr(term::Attr::Bold);
+                    AnyTerminal::Stderr {
+                        term: t,
+                        supports_reset,
+                        supports_color,
+                        supports_bold,
+                    }
+                })
+                .unwrap_or(AnyTerminal::FallbackStderr)
+        } else {
+            term::stdout()
+                .map(|t| {
+                    let supports_reset = t.supports_reset();
+                    let supports_color = t.supports_color();
+                    let supports_bold = t.supports_attr(term::Attr::Bold);
+                    AnyTerminal::Stdout {
+                        term: t,
+                        supports_reset,
+                        supports_color,
+                        supports_bold,
+                    }
+                })
+                .unwrap_or(AnyTerminal::FallbackStdout)
+        };
+
+        let use_color = self.color.unwrap_or_else(|| io.should_use_color());
+        ColoredTermDecorator {
+            term: RefCell::new(io),
+            use_color,
+        }
+    }
+}
 
 struct FileAppender {
     path: PathBuf,
@@ -283,6 +563,7 @@ fn custom_print_msg_header(
 
 fn initlogger(
     std_enabled: bool,
+    std_colored: bool,
     file_enabled: bool,
     logfile: &str,
     filesize: u64,
@@ -294,8 +575,16 @@ fn initlogger(
     fn __get_std_drain__<D: Drain>(
         log_level: Level,
         detail: bool,
-    ) -> slog::LevelFilter<std::sync::Mutex<slog_term::FullFormat<slog_term::TermDecorator>>> {
-        let decorator = slog_term::TermDecorator::new().build();
+        std_colored: bool,
+    ) -> slog::LevelFilter<std::sync::Mutex<slog_term::FullFormat<ColoredTermDecorator>>> {
+        let decorator_builder = ColoredTermDecorator::new();
+
+        let decorator = if std_colored {
+            decorator_builder.force_color().build()
+        } else {
+            decorator_builder.force_plain().build()
+        };
+
         let mut iner = slog_term::FullFormat::new(decorator)
             .use_custom_timestamp(timestamp_custom)
             .use_custom_header_print(custom_print_msg_header);
@@ -329,9 +618,11 @@ fn initlogger(
     if file_enabled && std_enabled {
         slog::Logger::root(
             slog::Duplicate::new(
-                __get_std_drain__::<
-                    std::sync::Mutex<slog_term::FullFormat<slog_term::TermDecorator>>,
-                >(log_level, detail),
+                __get_std_drain__::<std::sync::Mutex<slog_term::FullFormat<ColoredTermDecorator>>>(
+                    log_level,
+                    detail,
+                    std_colored,
+                ),
                 __get_file_drain__::<
                     slog_term::FullFormat<slog_term::PlainSyncDecorator<FileAppender>>,
                 >(logfile, filesize, log_level, detail, keep_num, compress),
@@ -349,8 +640,10 @@ fn initlogger(
         )
     } else if !file_enabled && std_enabled {
         slog::Logger::root(
-            __get_std_drain__::<std::sync::Mutex<slog_term::FullFormat<slog_term::TermDecorator>>>(
-                log_level, detail,
+            __get_std_drain__::<std::sync::Mutex<slog_term::FullFormat<ColoredTermDecorator>>>(
+                log_level,
+                detail,
+                std_colored,
             )
             .fuse(),
             o!(),
@@ -362,6 +655,7 @@ fn initlogger(
 
 pub fn setup_logger(
     std_enabled: bool,
+    std_colored: bool,
     file_enabled: bool,
     logfile: &str,
     filesize: u64,
@@ -372,6 +666,7 @@ pub fn setup_logger(
 ) {
     let logger = initlogger(
         std_enabled,
+        std_colored,
         file_enabled,
         logfile,
         filesize,
@@ -388,6 +683,7 @@ pub fn setup_logger(
 pub fn setup_logger_with_cfg() {
     setup_logger(
         LOG_STD_ENABLE.lock().unwrap().to_owned(),
+        LOG_STD_COLORED.lock().unwrap().to_owned(),
         LOG_FILE_ENABLE.lock().unwrap().to_owned(),
         LOG_PATH.lock().unwrap().as_str(),
         LOG_MAX_SIZE_MB.lock().unwrap().to_owned() as u64 * MB,
@@ -406,6 +702,7 @@ lazy_static! {
     pub static ref LOG_MAX_SIZE_MB: Mutex<i32> = Mutex::new(100);
     pub static ref LOG_LEVEL: Mutex<Level> = Mutex::new(Level::Debug);
     pub static ref LOG_VERBOSE: Mutex<bool> = Mutex::new(false);
+    pub static ref LOG_STD_COLORED: Mutex<bool> = Mutex::new(false);
     pub static ref LOG_FILE_ENABLE: Mutex<bool> = Mutex::new(false);
     pub static ref LOG_STD_ENABLE: Mutex<bool> = Mutex::new(true);
 }
@@ -422,6 +719,7 @@ impl config::ConfigTrait for DefaultLogConfig {
             viperus::add_default("default.log_verbose", false);
             viperus::add_default("default.log_file_enable", false);
             viperus::add_default("default.log_std_enable", true);
+            viperus::add_default("default.log_std_colored", true);
         });
     }
 
@@ -461,6 +759,11 @@ impl config::ConfigTrait for DefaultLogConfig {
         if let Some(overwrited) = viperus::get::<bool>("default.log_std_enable") {
             if let Ok(mut log_std_enable) = LOG_STD_ENABLE.lock() {
                 *log_std_enable = overwrited;
+            }
+        }
+        if let Some(overwrited) = viperus::get::<bool>("default.log_std_colored") {
+            if let Ok(mut log_std_colored) = LOG_STD_COLORED.lock() {
+                *log_std_colored = overwrited;
             }
         }
     }

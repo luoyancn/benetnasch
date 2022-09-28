@@ -19,6 +19,7 @@ fn goodbye() {
 fn main() {
     benetnasch::logger::setup_logger(
         true,
+        true,
         false,
         "",
         0,
