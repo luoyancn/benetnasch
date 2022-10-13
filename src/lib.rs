@@ -3,6 +3,8 @@ extern crate slog;
 extern crate atty;
 extern crate chrono;
 extern crate libflate;
+extern crate notify;
+extern crate slog_atomic;
 extern crate slog_scope;
 extern crate slog_stdlog;
 extern crate slog_term;

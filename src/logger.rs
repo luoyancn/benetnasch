@@ -2,13 +2,17 @@ use std::cell::RefCell;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{mpsc, Mutex, Once};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    mpsc, Mutex, Once,
+};
 use std::thread;
 use std::time::{Duration, Instant};
 use std::u64;
 
 use atty;
 use libflate::gzip::Encoder as GzipEncoder;
+use notify::Watcher;
 use slog::{Drain, OwnedKVList, Record};
 use slog_term::{CountingWriter, RecordDecorator, ThreadSafeTimestampFn};
 use term;
@@ -579,7 +583,7 @@ fn initlogger(
     ) -> slog::LevelFilter<std::sync::Mutex<slog_term::FullFormat<ColoredTermDecorator>>> {
         let decorator_builder = ColoredTermDecorator::new();
 
-        let decorator = if std_colored {
+        let decorator = if std_colored && cfg!(not(windows)) {
             decorator_builder.force_color().build()
         } else {
             decorator_builder.force_plain().build()
@@ -680,6 +684,33 @@ pub fn setup_logger(
     guard.cancel_reset();
 }
 
+fn notifylevel(lf: Vec<String>) {
+    std::thread::spawn(move || {
+        let (tx, rx) = mpsc::channel();
+        let mut watcher: notify::RecommendedWatcher = notify::Watcher::new(
+            tx,
+            notify::Config::default()
+                .with_poll_interval(Duration::from_secs(2))
+                .with_compare_contents(true),
+        )
+        .unwrap();
+
+        for f in lf {
+            watcher
+                .watch(Path::new(&f), notify::RecursiveMode::NonRecursive)
+                .unwrap();
+        }
+        loop {
+            match rx.recv() {
+                Ok(_) => {
+                    atomic_drain_switch();
+                }
+                Err(e) => error!("watch error: {:?}", e),
+            }
+        }
+    });
+}
+
 pub fn setup_logger_with_cfg() {
     setup_logger(
         LOG_STD_ENABLE.lock().unwrap().to_owned(),
@@ -694,6 +725,32 @@ pub fn setup_logger_with_cfg() {
     );
 }
 
+/// Setup logger with config file, and enable change the loglevel
+/// in the runtime
+///
+/// # Example
+///
+/// ```
+///    let def_log_conf = DefaultLogConfig {};
+///    def_log_conf.set_default();
+///    read_config("/tmp/example.toml", vec![Box::new(def_log_conf)]);
+///    viperus::watch_all().unwrap();
+///    benetnasch::logger::setup_logger_with_cfg_dynamic(vec!["/tmp/example.toml".to_owned()]);
+/// ```
+///
+pub fn setup_logger_with_cfg_dynamic(loaded_configs: Vec<String>) {
+    let drain = ATOMIC_DRAIN_SWITCH.drain().fuse();
+    let drain = Mutex::new(drain)
+        .map_err(|_| io::Error::new(io::ErrorKind::Other, "mutex error"))
+        .fuse();
+    let logger = slog::Logger::root(drain.fuse(), o!());
+    let guard = slog_scope::set_global_logger(logger);
+    slog_stdlog::init().unwrap();
+    guard.cancel_reset();
+    atomic_drain_switch();
+    notifylevel(loaded_configs);
+}
+
 static INIT: Once = Once::new();
 
 lazy_static! {
@@ -702,9 +759,16 @@ lazy_static! {
     pub static ref LOG_MAX_SIZE_MB: Mutex<i32> = Mutex::new(100);
     pub static ref LOG_LEVEL: Mutex<Level> = Mutex::new(Level::Debug);
     pub static ref LOG_VERBOSE: Mutex<bool> = Mutex::new(false);
-    pub static ref LOG_STD_COLORED: Mutex<bool> = Mutex::new(false);
+    pub static ref LOG_STD_COLORED: Mutex<bool> = Mutex::new(true);
     pub static ref LOG_FILE_ENABLE: Mutex<bool> = Mutex::new(false);
     pub static ref LOG_STD_ENABLE: Mutex<bool> = Mutex::new(true);
+    static ref ATOMIC_DRAIN_SWITCH: slog_atomic::AtomicSwitchCtrl<(), io::Error> =
+        slog_atomic::AtomicSwitch::new(
+            slog::Discard.map_err(|_| io::Error::new(io::ErrorKind::Other, "should not happen"))
+        )
+        .ctrl();
+    static ref ATOMIC_DRAIN_SWITCH_STATE: AtomicBool = AtomicBool::new(false);
+    static ref SWITCH_SCHEDULED: AtomicBool = AtomicBool::new(false);
 }
 
 pub struct DefaultLogConfig();
@@ -766,5 +830,77 @@ impl config::ConfigTrait for DefaultLogConfig {
                 *log_std_colored = overwrited;
             }
         }
+    }
+}
+
+fn atomic_drain_switch() {
+    SWITCH_SCHEDULED.swap(true, Ordering::Relaxed);
+    ATOMIC_DRAIN_SWITCH_STATE.fetch_nand(true, Ordering::Relaxed);
+
+    let log_level = match viperus::get::<i32>("default.log_level") {
+        Some(level) if level > 0 && level <= 6 => Level::from_usize(level as usize).unwrap(),
+        _ => Level::Info,
+    };
+
+    let log_std_enabled = viperus::get::<bool>("default.log_std_enable").unwrap();
+    let std_colored = viperus::get::<bool>("default.log_std_colored").unwrap();
+    let file_log_enabled = viperus::get::<bool>("default.log_file_enable").unwrap();
+    let logfile = viperus::get::<String>("default.log_path").unwrap();
+    let filesize = viperus::get::<i32>("default.log_max_size_mb").unwrap();
+    let keep_num = viperus::get::<i32>("default.log_keep").unwrap();
+    let detail = viperus::get::<bool>("default.log_verbose").unwrap();
+
+    let std_wrapper = {
+        let decorator_builder = ColoredTermDecorator::new();
+        let decorator = if std_colored && cfg!(not(windows)) {
+            decorator_builder.force_color().build()
+        } else {
+            decorator_builder.force_plain().build()
+        };
+        let mut __inter__ = slog_term::FullFormat::new(decorator)
+            .use_custom_timestamp(timestamp_custom)
+            .use_custom_header_print(custom_print_msg_header);
+        if detail {
+            __inter__ = __inter__.use_file_location();
+        }
+        __inter__
+    };
+
+    let file_wraper = {
+        let adapter = FileAppender::new(
+            logfile,
+            false,
+            filesize as u64 * MB,
+            keep_num as usize,
+            false,
+        );
+        let decorator_file = slog_term::PlainSyncDecorator::new(adapter);
+        let mut __inter__ = slog_term::FullFormat::new(decorator_file)
+            .use_custom_timestamp(timestamp_custom)
+            .use_custom_header_print(custom_print_msg_header);
+        if detail {
+            __inter__ = __inter__.use_file_location();
+        }
+        __inter__
+    };
+
+    if log_std_enabled && file_log_enabled {
+        let __std_wrapper__ = Mutex::new(std_wrapper.build());
+        let __file_wrapper__ = file_wraper.build();
+        let multi = slog::Duplicate::new(__std_wrapper__, __file_wrapper__);
+        ATOMIC_DRAIN_SWITCH.set(
+            Mutex::new(multi.filter_level(log_level).fuse())
+                .map_err(|_| io::Error::new(io::ErrorKind::Other, "mutex error")),
+        )
+    } else if log_std_enabled && !file_log_enabled {
+        ATOMIC_DRAIN_SWITCH.set(
+            Mutex::new(std_wrapper.build().filter_level(log_level).fuse())
+                .map_err(|_| io::Error::new(io::ErrorKind::Other, "mutex error")),
+        )
+    } else if !log_std_enabled && file_log_enabled {
+        ATOMIC_DRAIN_SWITCH.set(
+            Mutex::new(file_wraper.build().filter_level(log_level).fuse())
+                .map_err(|_| io::Error::new(io::ErrorKind::Other, "mutex error")),
+        )
     }
 }
