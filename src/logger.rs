@@ -28,6 +28,26 @@ pub const KB: u64 = BITE * 1024;
 pub const MB: u64 = KB * 1024;
 pub const GB: u64 = MB * 1024;
 
+static INIT: Once = Once::new();
+
+lazy_static! {
+    pub static ref LOG_PATH: Mutex<String> = Mutex::new(String::from("logs"));
+    pub static ref LOG_KEEP: Mutex<i32> = Mutex::new(0);
+    pub static ref LOG_MAX_SIZE_MB: Mutex<i32> = Mutex::new(100);
+    pub static ref LOG_LEVEL: Mutex<Level> = Mutex::new(Level::Debug);
+    pub static ref LOG_VERBOSE: Mutex<bool> = Mutex::new(false);
+    pub static ref LOG_STD_COLORED: Mutex<bool> = Mutex::new(true);
+    pub static ref LOG_FILE_ENABLE: Mutex<bool> = Mutex::new(false);
+    pub static ref LOG_STD_ENABLE: Mutex<bool> = Mutex::new(true);
+    static ref ATOMIC_DRAIN_SWITCH: slog_atomic::AtomicSwitchCtrl<(), io::Error> =
+        slog_atomic::AtomicSwitch::new(
+            slog::Discard.map_err(|_| io::Error::new(io::ErrorKind::Other, "should not happen"))
+        )
+        .ctrl();
+    static ref ATOMIC_DRAIN_SWITCH_STATE: AtomicBool = AtomicBool::new(false);
+    static ref SWITCH_SCHEDULED: AtomicBool = AtomicBool::new(false);
+}
+
 #[macro_export]
 macro_rules! crit( ($($args:tt)+) => {
     $crate::slog_scope_crit![$($args)+];
@@ -565,6 +585,48 @@ fn custom_print_msg_header(
     Ok(count_rd.count() != 0)
 }
 
+fn __get_std_drain__(
+    std_colored: bool,
+    detail: bool,
+) -> slog_term::FullFormatBuilder<ColoredTermDecorator> {
+    let decorator_builder = ColoredTermDecorator::new();
+    let decorator = if std_colored && cfg!(not(windows)) {
+        decorator_builder.force_color().build()
+    } else {
+        decorator_builder.force_plain().build()
+    };
+    let mut __inter__ = slog_term::FullFormat::new(decorator)
+        .use_custom_timestamp(timestamp_custom)
+        .use_custom_header_print(custom_print_msg_header);
+    if detail {
+        __inter__ = __inter__.use_file_location();
+    }
+    __inter__
+}
+
+fn __get_file_drain__(
+    logfile: &str,
+    filesize: u64,
+    detail: bool,
+    keep_num: usize,
+) -> slog_term::FullFormatBuilder<slog_term::PlainSyncDecorator<FileAppender>> {
+    let adapter = FileAppender::new(
+        logfile,
+        false,
+        filesize as u64 * MB,
+        keep_num as usize,
+        false,
+    );
+    let decorator_file = slog_term::PlainSyncDecorator::new(adapter);
+    let mut __inter__ = slog_term::FullFormat::new(decorator_file)
+        .use_custom_timestamp(timestamp_custom)
+        .use_custom_header_print(custom_print_msg_header);
+    if detail {
+        __inter__ = __inter__.use_file_location();
+    }
+    __inter__
+}
+
 fn initlogger(
     std_enabled: bool,
     std_colored: bool,
@@ -574,82 +636,23 @@ fn initlogger(
     log_level: Level,
     detail: bool,
     keep_num: usize,
-    compress: bool,
+    _compress: bool,
 ) -> slog::Logger {
-    fn __get_std_drain__<D: Drain>(
-        log_level: Level,
-        detail: bool,
-        std_colored: bool,
-    ) -> slog::LevelFilter<std::sync::Mutex<slog_term::FullFormat<ColoredTermDecorator>>> {
-        let decorator_builder = ColoredTermDecorator::new();
-
-        let decorator = if std_colored && cfg!(not(windows)) {
-            decorator_builder.force_color().build()
-        } else {
-            decorator_builder.force_plain().build()
-        };
-
-        let mut iner = slog_term::FullFormat::new(decorator)
-            .use_custom_timestamp(timestamp_custom)
-            .use_custom_header_print(custom_print_msg_header);
-        if detail {
-            iner = iner.use_file_location();
-        }
-        let drain = Mutex::new(iner.build());
-        slog::LevelFilter::new(drain, log_level)
-    }
-
-    fn __get_file_drain__<D: Drain>(
-        logfile: &str,
-        filesize: u64,
-        log_level: Level,
-        detail: bool,
-        keep_num: usize,
-        compress: bool,
-    ) -> slog::LevelFilter<slog_term::FullFormat<slog_term::PlainSyncDecorator<FileAppender>>> {
-        let adapter = FileAppender::new(logfile, false, filesize, keep_num, compress);
-        let decorator_file = slog_term::PlainSyncDecorator::new(adapter);
-        let mut file_iner = slog_term::FullFormat::new(decorator_file)
-            .use_custom_timestamp(timestamp_custom)
-            .use_custom_header_print(custom_print_msg_header);
-        if detail {
-            file_iner = file_iner.use_file_location();
-        }
-        let drain_file = file_iner.build();
-        slog::LevelFilter::new(drain_file, log_level)
-    }
-
     if file_enabled && std_enabled {
-        slog::Logger::root(
-            slog::Duplicate::new(
-                __get_std_drain__::<std::sync::Mutex<slog_term::FullFormat<ColoredTermDecorator>>>(
-                    log_level,
-                    detail,
-                    std_colored,
-                ),
-                __get_file_drain__::<
-                    slog_term::FullFormat<slog_term::PlainSyncDecorator<FileAppender>>,
-                >(logfile, filesize, log_level, detail, keep_num, compress),
-            )
-            .fuse(),
-            o!(),
-        )
+        let __file_wrapper__ = __get_file_drain__(logfile, filesize, detail, keep_num).build();
+        let __std_wrapper__ = Mutex::new(__get_std_drain__(std_colored, detail).build());
+        let __multi__ = slog::Duplicate::new(__std_wrapper__, __file_wrapper__);
+        slog::Logger::root(__multi__.filter_level(log_level).fuse(), o!())
     } else if file_enabled && !std_enabled {
+        let __file_wrapper__ = __get_file_drain__(logfile, filesize, detail, keep_num);
         slog::Logger::root(
-            __get_file_drain__::<slog_term::FullFormat<slog_term::PlainSyncDecorator<FileAppender>>>(
-                logfile, filesize, log_level, detail, keep_num, compress,
-            )
-            .fuse(),
+            Mutex::new(__file_wrapper__.build().filter_level(log_level).fuse()).fuse(),
             o!(),
         )
     } else if !file_enabled && std_enabled {
+        let __std_wrapper__ = __get_std_drain__(std_colored, detail);
         slog::Logger::root(
-            __get_std_drain__::<std::sync::Mutex<slog_term::FullFormat<ColoredTermDecorator>>>(
-                log_level,
-                detail,
-                std_colored,
-            )
-            .fuse(),
+            Mutex::new(__std_wrapper__.build().filter_level(log_level).fuse()).fuse(),
             o!(),
         )
     } else {
@@ -731,8 +734,10 @@ pub fn setup_logger_with_cfg() {
 /// # Example
 ///
 /// ```
+///
 ///    let def_log_conf = DefaultLogConfig {};
 ///    def_log_conf.set_default();
+///
 ///    read_config("/tmp/example.toml", vec![Box::new(def_log_conf)]);
 ///    viperus::watch_all().unwrap();
 ///    benetnasch::logger::setup_logger_with_cfg_dynamic(vec!["/tmp/example.toml".to_owned()]);
@@ -749,26 +754,6 @@ pub fn setup_logger_with_cfg_dynamic(loaded_configs: Vec<String>) {
     guard.cancel_reset();
     atomic_drain_switch();
     notifylevel(loaded_configs);
-}
-
-static INIT: Once = Once::new();
-
-lazy_static! {
-    pub static ref LOG_PATH: Mutex<String> = Mutex::new(String::from("logs"));
-    pub static ref LOG_KEEP: Mutex<i32> = Mutex::new(0);
-    pub static ref LOG_MAX_SIZE_MB: Mutex<i32> = Mutex::new(100);
-    pub static ref LOG_LEVEL: Mutex<Level> = Mutex::new(Level::Debug);
-    pub static ref LOG_VERBOSE: Mutex<bool> = Mutex::new(false);
-    pub static ref LOG_STD_COLORED: Mutex<bool> = Mutex::new(true);
-    pub static ref LOG_FILE_ENABLE: Mutex<bool> = Mutex::new(false);
-    pub static ref LOG_STD_ENABLE: Mutex<bool> = Mutex::new(true);
-    static ref ATOMIC_DRAIN_SWITCH: slog_atomic::AtomicSwitchCtrl<(), io::Error> =
-        slog_atomic::AtomicSwitch::new(
-            slog::Discard.map_err(|_| io::Error::new(io::ErrorKind::Other, "should not happen"))
-        )
-        .ctrl();
-    static ref ATOMIC_DRAIN_SWITCH_STATE: AtomicBool = AtomicBool::new(false);
-    static ref SWITCH_SCHEDULED: AtomicBool = AtomicBool::new(false);
 }
 
 pub struct DefaultLogConfig();
@@ -842,47 +827,16 @@ fn atomic_drain_switch() {
         _ => Level::Info,
     };
 
-    let log_std_enabled = viperus::get::<bool>("default.log_std_enable").unwrap();
-    let std_colored = viperus::get::<bool>("default.log_std_colored").unwrap();
-    let file_log_enabled = viperus::get::<bool>("default.log_file_enable").unwrap();
-    let logfile = viperus::get::<String>("default.log_path").unwrap();
-    let filesize = viperus::get::<i32>("default.log_max_size_mb").unwrap();
-    let keep_num = viperus::get::<i32>("default.log_keep").unwrap();
-    let detail = viperus::get::<bool>("default.log_verbose").unwrap();
+    let log_std_enabled = viperus::get::<bool>("default.log_std_enable").unwrap_or(true);
+    let std_colored = viperus::get::<bool>("default.log_std_colored").unwrap_or(true);
+    let file_log_enabled = viperus::get::<bool>("default.log_file_enable").unwrap_or(false);
+    let logfile = viperus::get::<String>("default.log_path").unwrap_or_else(|| "logs".to_owned());
+    let filesize = viperus::get::<i32>("default.log_max_size_mb").unwrap_or(100);
+    let keep_num = viperus::get::<i32>("default.log_keep").unwrap_or(7);
+    let detail = viperus::get::<bool>("default.log_verbose").unwrap_or(false);
 
-    let std_wrapper = {
-        let decorator_builder = ColoredTermDecorator::new();
-        let decorator = if std_colored && cfg!(not(windows)) {
-            decorator_builder.force_color().build()
-        } else {
-            decorator_builder.force_plain().build()
-        };
-        let mut __inter__ = slog_term::FullFormat::new(decorator)
-            .use_custom_timestamp(timestamp_custom)
-            .use_custom_header_print(custom_print_msg_header);
-        if detail {
-            __inter__ = __inter__.use_file_location();
-        }
-        __inter__
-    };
-
-    let file_wraper = {
-        let adapter = FileAppender::new(
-            logfile,
-            false,
-            filesize as u64 * MB,
-            keep_num as usize,
-            false,
-        );
-        let decorator_file = slog_term::PlainSyncDecorator::new(adapter);
-        let mut __inter__ = slog_term::FullFormat::new(decorator_file)
-            .use_custom_timestamp(timestamp_custom)
-            .use_custom_header_print(custom_print_msg_header);
-        if detail {
-            __inter__ = __inter__.use_file_location();
-        }
-        __inter__
-    };
+    let std_wrapper = __get_std_drain__(std_colored, detail);
+    let file_wraper = __get_file_drain__(&logfile, filesize as u64 * MB, detail, keep_num as usize);
 
     if log_std_enabled && file_log_enabled {
         let __std_wrapper__ = Mutex::new(std_wrapper.build());
