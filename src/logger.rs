@@ -40,9 +40,9 @@ lazy_static! {
     pub static ref LOG_FILE_ENABLE: Mutex<bool> = Mutex::new(false);
     pub static ref LOG_STD_ENABLE: Mutex<bool> = Mutex::new(true);
     static ref ATOMIC_DRAIN_SWITCH: slog_atomic::AtomicSwitchCtrl<(), io::Error> =
-        slog_atomic::AtomicSwitch::new(
-            slog::Discard.map_err(|_| io::Error::new(io::ErrorKind::Other, "should not happen"))
-        )
+        slog_atomic::AtomicSwitch::new(slog::Discard.map_err(|_| {
+            io::Error::new(io::ErrorKind::Other, "should not happen")
+        }))
         .ctrl();
     static ref ATOMIC_DRAIN_SWITCH_STATE: AtomicBool = AtomicBool::new(false);
     static ref SWITCH_SCHEDULED: AtomicBool = AtomicBool::new(false);
@@ -85,14 +85,12 @@ enum AnyTerminal {
         term: Box<term::StdoutTerminal>,
         supports_reset: bool,
         supports_color: bool,
-        supports_bold: bool,
     },
     /// Stderr terminal
     Stderr {
         term: Box<term::StderrTerminal>,
         supports_reset: bool,
         supports_color: bool,
-        supports_bold: bool,
     },
     FallbackStdout,
     FallbackStderr,
@@ -117,19 +115,19 @@ struct ColoredTermDecorator {
 impl ColoredTermDecorator {
     /// Start building `TermDecorator`
     #[allow(clippy::new_ret_no_self)]
-    pub fn new() -> ColoredTermDecoratorBuilder {
+    fn new() -> ColoredTermDecoratorBuilder {
         ColoredTermDecoratorBuilder::new()
     }
 
     /// `Level` color
     ///
     /// Standard level to Unix color conversion used by `TermDecorator`
-    pub fn level_to_color(level: slog::Level) -> u16 {
+    fn level_to_color(level: slog::Level) -> u16 {
         match level {
             Level::Critical => 129,
             Level::Error => 196,
             Level::Warning => 214,
-            Level::Info => 250,
+            Level::Info => 2,
             Level::Debug => 39,
             Level::Trace => 51,
         }
@@ -137,7 +135,12 @@ impl ColoredTermDecorator {
 }
 
 impl slog_term::Decorator for ColoredTermDecorator {
-    fn with_record<F>(&self, record: &Record, _logger_values: &OwnedKVList, f: F) -> io::Result<()>
+    fn with_record<F>(
+        &self,
+        record: &Record,
+        _logger_values: &OwnedKVList,
+        f: F,
+    ) -> io::Result<()>
     where
         F: FnOnce(&mut dyn RecordDecorator) -> io::Result<()>,
     {
@@ -237,12 +240,11 @@ impl<'a> RecordDecorator for ColoredTermRecordDecorator<'a> {
             &mut AnyTerminal::Stdout {
                 ref mut term,
                 supports_color,
-                supports_bold,
                 ..
             } => {
-                if supports_bold {
-                    term.attr(term::Attr::Bold)?;
-                }
+                //if supports_bold {
+                //    term.attr(term::Attr::Bold)?;
+                //}
                 if supports_color {
                     term.fg(color as term::color::Color)?;
                 }
@@ -251,18 +253,18 @@ impl<'a> RecordDecorator for ColoredTermRecordDecorator<'a> {
             &mut AnyTerminal::Stderr {
                 ref mut term,
                 supports_color,
-                supports_bold,
                 ..
             } => {
-                if supports_bold {
-                    term.attr(term::Attr::Bold)?;
-                }
+                //if supports_bold {
+                //    term.attr(term::Attr::Bold)?;
+                //}
                 if supports_color {
                     term.fg(color as term::color::Color)?;
                 }
                 Ok(())
             }
-            &mut AnyTerminal::FallbackStdout | &mut AnyTerminal::FallbackStderr => Ok(()),
+            &mut AnyTerminal::FallbackStdout
+            | &mut AnyTerminal::FallbackStderr => Ok(()),
         }
         .map_err(term_error_to_io_error)
     }
@@ -277,7 +279,8 @@ impl<'a> RecordDecorator for ColoredTermRecordDecorator<'a> {
 
     fn start_msg(&mut self) -> io::Result<()> {
         // msg is just like key
-        self.start_key()
+        //self.start_key()
+        Ok(())
     }
 }
 
@@ -323,12 +326,10 @@ impl ColoredTermDecoratorBuilder {
                 .map(|t| {
                     let supports_reset = t.supports_reset();
                     let supports_color = t.supports_color();
-                    let supports_bold = t.supports_attr(term::Attr::Bold);
                     AnyTerminal::Stderr {
                         term: t,
                         supports_reset,
                         supports_color,
-                        supports_bold,
                     }
                 })
                 .unwrap_or(AnyTerminal::FallbackStderr)
@@ -337,12 +338,10 @@ impl ColoredTermDecoratorBuilder {
                 .map(|t| {
                     let supports_reset = t.supports_reset();
                     let supports_color = t.supports_color();
-                    let supports_bold = t.supports_attr(term::Attr::Bold);
                     AnyTerminal::Stdout {
                         term: t,
                         supports_reset,
                         supports_color,
-                        supports_bold,
                     }
                 })
                 .unwrap_or(AnyTerminal::FallbackStdout)
@@ -452,12 +451,17 @@ impl FileAppender {
             let rotated_path = self.rotated_path(1)?;
             {
                 if self.rotate_compress {
-                    let (plain_path, temp_gz_path) = self.rotated_paths_for_compression()?;
+                    let (plain_path, temp_gz_path) =
+                        self.rotated_paths_for_compression()?;
                     let (tx, rx) = mpsc::channel();
 
                     fs::rename(&self.path, &plain_path)?;
                     thread::spawn(move || {
-                        let result = Self::compress(plain_path, temp_gz_path, rotated_path);
+                        let result = Self::compress(
+                            plain_path,
+                            temp_gz_path,
+                            rotated_path,
+                        );
                         let _ = tx.send(result);
                     });
 
@@ -508,7 +512,11 @@ impl FileAppender {
         ))
     }
 
-    fn compress(input_path: PathBuf, temp_path: PathBuf, output_path: PathBuf) -> io::Result<()> {
+    fn compress(
+        input_path: PathBuf,
+        temp_path: PathBuf,
+        output_path: PathBuf,
+    ) -> io::Result<()> {
         let mut input = File::open(&input_path)?;
         let mut temp = GzipEncoder::new(File::create(&temp_path)?)?;
         io::copy(&mut input, &mut temp)?;
@@ -639,20 +647,25 @@ fn initlogger(
     _compress: bool,
 ) -> slog::Logger {
     if file_enabled && std_enabled {
-        let __file_wrapper__ = __get_file_drain__(logfile, filesize, detail, keep_num).build();
-        let __std_wrapper__ = Mutex::new(__get_std_drain__(std_colored, detail).build());
+        let __file_wrapper__ =
+            __get_file_drain__(logfile, filesize, detail, keep_num).build();
+        let __std_wrapper__ =
+            Mutex::new(__get_std_drain__(std_colored, detail).build());
         let __multi__ = slog::Duplicate::new(__std_wrapper__, __file_wrapper__);
         slog::Logger::root(__multi__.filter_level(log_level).fuse(), o!())
     } else if file_enabled && !std_enabled {
-        let __file_wrapper__ = __get_file_drain__(logfile, filesize, detail, keep_num);
+        let __file_wrapper__ =
+            __get_file_drain__(logfile, filesize, detail, keep_num);
         slog::Logger::root(
-            Mutex::new(__file_wrapper__.build().filter_level(log_level).fuse()).fuse(),
+            Mutex::new(__file_wrapper__.build().filter_level(log_level).fuse())
+                .fuse(),
             o!(),
         )
     } else if !file_enabled && std_enabled {
         let __std_wrapper__ = __get_std_drain__(std_colored, detail);
         slog::Logger::root(
-            Mutex::new(__std_wrapper__.build().filter_level(log_level).fuse()).fuse(),
+            Mutex::new(__std_wrapper__.build().filter_level(log_level).fuse())
+                .fuse(),
             o!(),
         )
     } else {
@@ -783,7 +796,8 @@ impl config::ConfigTrait for DefaultLogConfig {
                 *log_keep = overwrited;
             }
         }
-        if let Some(overwrited) = viperus::get::<i32>("default.log_max_size_mb") {
+        if let Some(overwrited) = viperus::get::<i32>("default.log_max_size_mb")
+        {
             if let Ok(mut log_max_size_mb) = LOG_MAX_SIZE_MB.lock() {
                 *log_max_size_mb = overwrited;
             }
@@ -791,7 +805,8 @@ impl config::ConfigTrait for DefaultLogConfig {
         if let Some(overwrited) = viperus::get::<i32>("default.log_level") {
             if let Ok(mut log_level) = LOG_LEVEL.lock() {
                 if overwrited <= 6 && overwrited > 0 {
-                    *log_level = Level::from_usize(overwrited as usize).unwrap();
+                    *log_level =
+                        Level::from_usize(overwrited as usize).unwrap();
                 }
             }
         }
@@ -800,17 +815,22 @@ impl config::ConfigTrait for DefaultLogConfig {
                 *log_verbose = overwrited;
             }
         }
-        if let Some(overwrited) = viperus::get::<bool>("default.log_file_enable") {
+        if let Some(overwrited) =
+            viperus::get::<bool>("default.log_file_enable")
+        {
             if let Ok(mut log_file_enable) = LOG_FILE_ENABLE.lock() {
                 *log_file_enable = overwrited;
             }
         }
-        if let Some(overwrited) = viperus::get::<bool>("default.log_std_enable") {
+        if let Some(overwrited) = viperus::get::<bool>("default.log_std_enable")
+        {
             if let Ok(mut log_std_enable) = LOG_STD_ENABLE.lock() {
                 *log_std_enable = overwrited;
             }
         }
-        if let Some(overwrited) = viperus::get::<bool>("default.log_std_colored") {
+        if let Some(overwrited) =
+            viperus::get::<bool>("default.log_std_colored")
+        {
             if let Ok(mut log_std_colored) = LOG_STD_COLORED.lock() {
                 *log_std_colored = overwrited;
             }
@@ -823,38 +843,55 @@ fn atomic_drain_switch() {
     ATOMIC_DRAIN_SWITCH_STATE.fetch_nand(true, Ordering::Relaxed);
 
     let log_level = match viperus::get::<i32>("default.log_level") {
-        Some(level) if level > 0 && level <= 6 => Level::from_usize(level as usize).unwrap(),
+        Some(level) if level > 0 && level <= 6 => {
+            Level::from_usize(level as usize).unwrap()
+        }
         _ => Level::Info,
     };
 
-    let log_std_enabled = viperus::get::<bool>("default.log_std_enable").unwrap_or(true);
-    let std_colored = viperus::get::<bool>("default.log_std_colored").unwrap_or(true);
-    let file_log_enabled = viperus::get::<bool>("default.log_file_enable").unwrap_or(false);
-    let logfile = viperus::get::<String>("default.log_path").unwrap_or_else(|| "logs".to_owned());
-    let filesize = viperus::get::<i32>("default.log_max_size_mb").unwrap_or(100);
+    let log_std_enabled =
+        viperus::get::<bool>("default.log_std_enable").unwrap_or(true);
+    let std_colored =
+        viperus::get::<bool>("default.log_std_colored").unwrap_or(true);
+    let file_log_enabled =
+        viperus::get::<bool>("default.log_file_enable").unwrap_or(false);
+    let logfile = viperus::get::<String>("default.log_path")
+        .unwrap_or_else(|| "logs".to_owned());
+    let filesize =
+        viperus::get::<i32>("default.log_max_size_mb").unwrap_or(100);
     let keep_num = viperus::get::<i32>("default.log_keep").unwrap_or(7);
     let detail = viperus::get::<bool>("default.log_verbose").unwrap_or(false);
 
     let std_wrapper = __get_std_drain__(std_colored, detail);
-    let file_wraper = __get_file_drain__(&logfile, filesize as u64 * MB, detail, keep_num as usize);
+    let file_wraper = __get_file_drain__(
+        &logfile,
+        filesize as u64 * MB,
+        detail,
+        keep_num as usize,
+    );
 
     if log_std_enabled && file_log_enabled {
         let __std_wrapper__ = Mutex::new(std_wrapper.build());
         let __file_wrapper__ = file_wraper.build();
         let multi = slog::Duplicate::new(__std_wrapper__, __file_wrapper__);
         ATOMIC_DRAIN_SWITCH.set(
-            Mutex::new(multi.filter_level(log_level).fuse())
-                .map_err(|_| io::Error::new(io::ErrorKind::Other, "mutex error")),
+            Mutex::new(multi.filter_level(log_level).fuse()).map_err(|_| {
+                io::Error::new(io::ErrorKind::Other, "mutex error")
+            }),
         )
     } else if log_std_enabled && !file_log_enabled {
         ATOMIC_DRAIN_SWITCH.set(
             Mutex::new(std_wrapper.build().filter_level(log_level).fuse())
-                .map_err(|_| io::Error::new(io::ErrorKind::Other, "mutex error")),
+                .map_err(|_| {
+                    io::Error::new(io::ErrorKind::Other, "mutex error")
+                }),
         )
     } else if !log_std_enabled && file_log_enabled {
         ATOMIC_DRAIN_SWITCH.set(
             Mutex::new(file_wraper.build().filter_level(log_level).fuse())
-                .map_err(|_| io::Error::new(io::ErrorKind::Other, "mutex error")),
+                .map_err(|_| {
+                    io::Error::new(io::ErrorKind::Other, "mutex error")
+                }),
         )
     }
 }
