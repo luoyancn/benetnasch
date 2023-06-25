@@ -1,10 +1,10 @@
 extern crate tokio;
-
 #[macro_use]
 extern crate benetnasch;
 
-#[cfg(all(target_family = "unix", not(target_os = "windows")))]
-use benetnasch::{shell, udevs};
+//#[cfg(all(target_family = "unix", feature="asyncudev", not(target_os = "windows")))]
+use benetnasch::udevs;
+use benetnasch::shell;
 #[cfg(all(target_family = "unix", not(target_os = "windows")))]
 use std::thread;
 
@@ -32,7 +32,7 @@ fn main() {
     wait!(hello, goodbye);
     trace!("hello trace");
 
-    #[cfg(all(target_family = "unix", not(target_os = "windows")))]
+    #[cfg(all(target_family = "unix", feature="asyncudev", not(target_os = "windows")))]
     if let Ok(rt) = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()

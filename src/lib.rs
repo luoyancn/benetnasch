@@ -22,11 +22,11 @@ pub use slog_scope::{
 pub mod config;
 pub mod logger;
 
-#[cfg(all(target_family = "unix", not(target_os = "windows")))]
+#[cfg(all(target_family = "unix", feature = "asyncshell", not(target_os = "windows")))]
 #[allow(unused)]
 pub mod shell;
 
-#[cfg(all(target_family = "unix", not(target_os = "windows")))]
+#[cfg(all(target_family = "unix", feature = "asyncudev", not(target_os = "windows")))]
 #[allow(unused)]
 pub mod udevs;
 
